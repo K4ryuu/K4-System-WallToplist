@@ -56,7 +56,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 {
 	public override string ModuleName => "K4-System @ Wall Toplist";
 	public override string ModuleAuthor => "K4ryuu";
-	public override string ModuleVersion => "1.0.0";
+	public override string ModuleVersion => "1.0.1";
 	public required PluginConfig Config { get; set; } = new PluginConfig();
 	public static PluginCapability<IK4WorldTextSharedAPI> Capability_SharedAPI { get; } = new("k4-worldtext:sharedapi");
 
