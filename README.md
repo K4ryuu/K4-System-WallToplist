@@ -40,7 +40,7 @@ To use this server addon, you'll need the following dependencies installed:
 
 ## Roadmap
 
-- [ ] Optimise and refactor code
+- [ ] No plans yet.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
