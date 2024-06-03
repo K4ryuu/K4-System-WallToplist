@@ -12,11 +12,11 @@ using Dapper;
 using K4WorldTextSharedAPI;
 using Microsoft.Extensions.Logging;
 using MySqlConnector;
-using System.Collections.Concurrent;
 using System.Text.Json;
 using CounterStrikeSharp.API.Modules.Timers;
 
 namespace K4Toplist;
+
 public class PluginConfig : BasePluginConfig
 {
 	[JsonPropertyName("TopCount")]
@@ -32,6 +32,7 @@ public class PluginConfig : BasePluginConfig
 	[JsonPropertyName("ConfigVersion")]
 	public override int Version { get; set; } = 3;
 }
+
 public sealed class DatabaseSettings
 {
 	[JsonPropertyName("host")]
@@ -49,6 +50,7 @@ public sealed class DatabaseSettings
 	[JsonPropertyName("table-prefix")]
 	public string TablePrefix { get; set; } = "";
 }
+
 [MinimumApiVersion(205)]
 public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 {
@@ -58,7 +60,8 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 	public required PluginConfig Config { get; set; } = new PluginConfig();
 	public static PluginCapability<IK4WorldTextSharedAPI> Capability_SharedAPI { get; } = new("k4-worldtext:sharedapi");
 
-	private ConcurrentDictionary<int, List<TextLine>> _currentTopLists = new();
+	private List<int> _currentTopLists = new();
+	private CounterStrikeSharp.API.Modules.Timers.Timer? _updateTimer;
 
 	public void OnConfigParsed(PluginConfig config)
 	{
@@ -70,11 +73,11 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 	public override void OnAllPluginsLoaded(bool hotReload)
 	{
-		LoadWorldTextFromFile();
+		AddTimer(3, LoadWorldTextFromFile);
 
 		if (Config.TimeBasedUpdate)
 		{
-			AddTimer(Config.UpdateInterval, RefreshTopLists, TimerFlags.REPEAT);
+			_updateTimer = AddTimer(Config.UpdateInterval, RefreshTopLists, TimerFlags.REPEAT);
 		}
 
 		RegisterEventHandler((EventRoundStart @event, GameEventInfo info) =>
@@ -82,26 +85,33 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 			RefreshTopLists();
 			return HookResult.Continue;
 		});
+
+		RegisterListener<Listeners.OnMapStart>((mapName) =>
+		{
+			AddTimer(1, LoadWorldTextFromFile);
+		});
+
+		RegisterListener<Listeners.OnMapEnd>(() =>
+		{
+			_currentTopLists.Clear();
+		});
 	}
 
 	public override void Unload(bool hotReload)
 	{
-		foreach (var messageID in _currentTopLists.Keys)
+		foreach (int messageID in _currentTopLists)
 		{
-			var checkAPI = Capability_SharedAPI.Get();
-			if (checkAPI != null)
-			{
-				checkAPI.RemoveWorldText(messageID);
-			}
+			Capability_SharedAPI.Get()?.RemoveWorldText(messageID);
 		}
 		_currentTopLists.Clear();
+		_updateTimer?.Kill();
 	}
 
 	[ConsoleCommand("css_k4toplist", "Sets up the wall toplist of K4-System")]
 	[RequiresPermissions("@css/root")]
 	public void OnToplistAdd(CCSPlayerController player, CommandInfo command)
 	{
-		IK4WorldTextSharedAPI? checkAPI = Capability_SharedAPI.Get();
+		var checkAPI = Capability_SharedAPI.Get();
 		if (checkAPI is null)
 		{
 			command.ReplyToCommand($" {ChatColors.Silver}[ {ChatColors.Lime}K4-TopList {ChatColors.Silver}] {ChatColors.LightRed}Failed to get the shared API.");
@@ -110,66 +120,33 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 		Task.Run(async () =>
 		{
-			List<PlayerPlace> topList = await GetTopPlayersAsync(Config.TopCount);
-
-			List<TextLine> linesList = new List<TextLine>
-			{
-				new TextLine
-				{
-					Text = Config.TitleText,
-					Color = Color.Pink,
-					FontSize = 24,
-					FullBright = true,
-					Scale = 0.45f
-				}
-			};
-
-			for (int i = 0; i < topList.Count; i++)
-			{
-				var topplayer = topList[i];
-				var color = i switch
-				{
-					0 => Color.Red,
-					1 => Color.Orange,
-					2 => Color.Yellow,
-					_ => Color.White
-				};
-
-				linesList.Add(new TextLine
-				{
-					Text = $"{i + 1}. {topplayer.Name} - {topplayer.Points} points",
-					Color = color,
-					FontSize = 24,
-					FullBright = true,
-					Scale = 0.35f,
-				});
-
-				Logger.LogInformation("Player {0} is on place {1} with {2} points", topplayer.Name, i + 1, topplayer.Points);
-			}
+			var topList = await GetTopPlayersAsync(Config.TopCount);
+			var linesList = GetTopListTextLines(topList);
 
 			Server.NextWorldUpdate(() =>
 			{
 				int messageID = checkAPI.AddWorldTextAtPlayer(player, TextPlacement.Wall, linesList);
+				_currentTopLists.Add(messageID);
 
 				var lineList = checkAPI.GetWorldTextLineEntities(messageID);
-				if (lineList == null || lineList.Count == 0)
+				if (lineList?.Count > 0)
+				{
+					var location = lineList[0]?.AbsOrigin;
+					var rotation = lineList[0]?.AbsRotation;
+
+					if (location != null && rotation != null)
+					{
+						SaveWorldTextToFile(location, rotation);
+					}
+					else
+					{
+						Logger.LogError("Failed to get location or rotation for message ID: {0}", messageID);
+					}
+				}
+				else
 				{
 					Logger.LogError("Failed to get world text line entities for message ID: {0}", messageID);
-					return;
 				}
-
-				var location = lineList[0]?.AbsOrigin;
-				var rotation = lineList[0]?.AbsRotation;
-
-				if (location == null || rotation == null)
-				{
-					Logger.LogError("Failed to get location or rotation for message ID: {0}", messageID);
-					return;
-				}
-
-				SaveWorldTextToFile(location, rotation);
-
-				_currentTopLists[messageID] = linesList;
 			});
 		});
 	}
@@ -178,21 +155,15 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 	[RequiresPermissions("@css/root")]
 	public void OnToplistRemove(CCSPlayerController player, CommandInfo command)
 	{
-		IK4WorldTextSharedAPI? checkAPI = Capability_SharedAPI.Get();
+		var checkAPI = Capability_SharedAPI.Get();
 		if (checkAPI is null)
 		{
 			command.ReplyToCommand($" {ChatColors.Silver}[ {ChatColors.Lime}K4-TopList {ChatColors.Silver}] {ChatColors.LightRed}Failed to get the shared API.");
 			return;
 		}
 
-		var target = _currentTopLists.Keys.ToList()
-			.SelectMany(id =>
-			{
-				var entities = checkAPI.GetWorldTextLineEntities(id);
-				return entities != null
-					? entities.Select(entity => new { Id = id, Entity = entity })
-					: Enumerable.Empty<dynamic>();
-			})
+		var target = _currentTopLists
+			.SelectMany(id => checkAPI.GetWorldTextLineEntities(id)?.Select(entity => new { Id = id, Entity = entity }) ?? Enumerable.Empty<dynamic>())
 			.Where(x => x.Entity.AbsOrigin != null && player.PlayerPawn.Value?.AbsOrigin != null && DistanceTo(x.Entity.AbsOrigin, player.PlayerPawn.Value!.AbsOrigin) < 100)
 			.OrderBy(x => x.Entity.AbsOrigin != null && player.PlayerPawn.Value?.AbsOrigin != null ? DistanceTo(x.Entity.AbsOrigin, player.PlayerPawn.Value!.AbsOrigin) : float.MaxValue)
 			.FirstOrDefault();
@@ -204,19 +175,16 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 		}
 
 		checkAPI.RemoveWorldText(target.Id);
-		_currentTopLists.TryRemove(target.Id, out List<TextLine> _);
+		_currentTopLists.Remove(target.Id);
 
 		var mapName = Server.MapName;
 		var path = Path.Combine(ModuleDirectory, $"{mapName}_toplists.json");
 		if (File.Exists(path))
 		{
 			var data = JsonSerializer.Deserialize<List<WorldTextData>>(File.ReadAllText(path));
-			if (data == null) return;
-
-			var worldTextData = data.FirstOrDefault(x => x.Location == target.Entity.AbsOrigin.ToString() && x.Rotation == target.Entity.AbsRotation.ToString());
-			if (worldTextData != null)
+			if (data != null)
 			{
-				data.Remove(worldTextData);
+				data.RemoveAll(x => x.Location == target.Entity.AbsOrigin.ToString() && x.Rotation == target.Entity.AbsRotation.ToString());
 				File.WriteAllText(path, JsonSerializer.Serialize(data));
 			}
 		}
@@ -226,7 +194,10 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 	private float DistanceTo(Vector a, Vector b)
 	{
-		return (float)Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
+		float dx = a.X - b.X;
+		float dy = a.Y - b.Y;
+		float dz = a.Z - b.Z;
+		return (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
 	}
 
 	private void SaveWorldTextToFile(Vector location, QAngle rotation)
@@ -242,8 +213,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 		List<WorldTextData> data;
 		if (File.Exists(path))
 		{
-			var existingData = File.ReadAllText(path);
-			data = JsonSerializer.Deserialize<List<WorldTextData>>(existingData) ?? new List<WorldTextData>();
+			data = JsonSerializer.Deserialize<List<WorldTextData>>(File.ReadAllText(path)) ?? new List<WorldTextData>();
 		}
 		else
 		{
@@ -265,82 +235,61 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 			var data = JsonSerializer.Deserialize<List<WorldTextData>>(File.ReadAllText(path));
 			if (data == null) return;
 
-			foreach (var worldTextData in data)
+			Task.Run(async () =>
 			{
-				var checkAPI = Capability_SharedAPI.Get();
-				if (checkAPI != null && worldTextData.Location != null && worldTextData.Rotation != null)
+				var topList = await GetTopPlayersAsync(Config.TopCount);
+				var linesList = GetTopListTextLines(topList);
+
+				Server.NextWorldUpdate(() =>
 				{
-					var messageID = checkAPI.AddWorldText(TextPlacement.Wall, new List<TextLine>(), ParseVector(worldTextData.Location), ParseQAngle(worldTextData.Rotation));
-					_currentTopLists[messageID] = new List<TextLine>();
-				}
-			}
+					var checkAPI = Capability_SharedAPI.Get();
+					if (checkAPI is null) return;
+
+					foreach (var worldTextData in data)
+					{
+						if (!string.IsNullOrEmpty(worldTextData.Location) && !string.IsNullOrEmpty(worldTextData.Rotation))
+						{
+							var messageID = checkAPI.AddWorldText(TextPlacement.Wall, linesList, ParseVector(worldTextData.Location), ParseQAngle(worldTextData.Rotation));
+							_currentTopLists.Add(messageID);
+						}
+					}
+				});
+			});
 		}
 	}
 
 	public static Vector ParseVector(string vectorString)
 	{
 		string[] components = vectorString.Split(' ');
-		if (components.Length != 3)
-			throw new ArgumentException("Invalid vector string format.");
-
-		float x = float.Parse(components[0]);
-		float y = float.Parse(components[1]);
-		float z = float.Parse(components[2]);
-
-		return new Vector(x, y, z);
+		if (components.Length == 3 &&
+			float.TryParse(components[0], out float x) &&
+			float.TryParse(components[1], out float y) &&
+			float.TryParse(components[2], out float z))
+		{
+			return new Vector(x, y, z);
+		}
+		throw new ArgumentException("Invalid vector string format.");
 	}
 
 	public static QAngle ParseQAngle(string qangleString)
 	{
 		string[] components = qangleString.Split(' ');
-		if (components.Length != 3)
-			throw new ArgumentException("Invalid QAngle string format.");
-
-		float x = float.Parse(components[0]);
-		float y = float.Parse(components[1]);
-		float z = float.Parse(components[2]);
-
-		return new QAngle(x, y, z);
+		if (components.Length == 3 &&
+			float.TryParse(components[0], out float x) &&
+			float.TryParse(components[1], out float y) &&
+			float.TryParse(components[2], out float z))
+		{
+			return new QAngle(x, y, z);
+		}
+		throw new ArgumentException("Invalid QAngle string format.");
 	}
 
 	private void RefreshTopLists()
 	{
 		Task.Run(async () =>
 		{
-			List<PlayerPlace> topList = await GetTopPlayersAsync(Config.TopCount);
-
-			List<TextLine> linesList = new List<TextLine>
-			{
-				new TextLine
-				{
-					Text = Config.TitleText,
-					Color = Color.Pink,
-					FontSize = 24,
-					FullBright = true,
-					Scale = 0.45f
-				}
-			};
-
-			for (int i = 0; i < topList.Count; i++)
-			{
-				var topplayer = topList[i];
-				var color = i switch
-				{
-					0 => Color.Red,
-					1 => Color.Orange,
-					2 => Color.Yellow,
-					_ => Color.White
-				};
-
-				linesList.Add(new TextLine
-				{
-					Text = $"{i + 1}. {topplayer.Name} - {topplayer.Points} points",
-					Color = color,
-					FontSize = 24,
-					FullBright = true,
-					Scale = 0.35f,
-				});
-			}
+			var topList = await GetTopPlayersAsync(Config.TopCount);
+			var linesList = GetTopListTextLines(topList);
 
 			Server.NextWorldUpdate(() =>
 			{
@@ -349,15 +298,52 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 					var checkAPI = Capability_SharedAPI.Get();
 					if (checkAPI != null)
 					{
-						foreach (int key in _currentTopLists.Keys)
+						foreach (int messageID in _currentTopLists)
 						{
-							_currentTopLists[key] = linesList;
-							checkAPI.UpdateWorldText(key, linesList);
+							checkAPI.UpdateWorldText(messageID, linesList);
 						}
 					}
 				});
 			});
 		});
+	}
+
+	private List<TextLine> GetTopListTextLines(List<PlayerPlace> topList)
+	{
+		var linesList = new List<TextLine>
+		{
+			new TextLine
+			{
+				Text = Config.TitleText,
+				Color = Color.Pink,
+				FontSize = 24,
+				FullBright = true,
+				Scale = 0.45f
+			}
+		};
+
+		for (int i = 0; i < topList.Count; i++)
+		{
+			var topplayer = topList[i];
+			var color = i switch
+			{
+				0 => Color.Red,
+				1 => Color.Orange,
+				2 => Color.Yellow,
+				_ => Color.White
+			};
+
+			linesList.Add(new TextLine
+			{
+				Text = $"{i + 1}. {topplayer.Name} - {topplayer.Points} points",
+				Color = color,
+				FontSize = 24,
+				FullBright = true,
+				Scale = 0.35f,
+			});
+		}
+
+		return linesList;
 	}
 
 	public async Task<List<PlayerPlace>> GetTopPlayersAsync(int topCount)
@@ -384,8 +370,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
                 ORDER BY points DESC
                 LIMIT @TopCount";
 
-				var result = await connection.QueryAsync<PlayerPlace>(query, new { TopCount = topCount });
-				return result.ToList();
+				return (await connection.QueryAsync<PlayerPlace>(query, new { TopCount = topCount })).ToList();
 			}
 		}
 		catch (Exception ex)
