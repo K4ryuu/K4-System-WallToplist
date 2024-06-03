@@ -38,6 +38,13 @@ To use this server addon, you'll need the following dependencies installed:
 
 <!-- ROADMAP -->
 
+## Commands (root)
+
+- css_k4toplist - Create a toplist in front of the player and save it to config file.
+- css_k4toprem - Remove closest k4toplist from your position. (100 units max)
+
+<!-- ROADMAP -->
+
 ## Roadmap
 
 - [ ] No plans yet.
