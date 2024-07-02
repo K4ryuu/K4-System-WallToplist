@@ -56,7 +56,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 {
 	public override string ModuleName => "K4-System @ Wall Toplist";
 	public override string ModuleAuthor => "K4ryuu";
-	public override string ModuleVersion => "1.0.1";
+	public override string ModuleVersion => "1.0.2";
 	public required PluginConfig Config { get; set; } = new PluginConfig();
 	public static PluginCapability<IK4WorldTextSharedAPI> Capability_SharedAPI { get; } = new("k4-worldtext:sharedapi");
 
@@ -99,10 +99,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 	public override void Unload(bool hotReload)
 	{
-		foreach (int messageID in _currentTopLists)
-		{
-			Capability_SharedAPI.Get()?.RemoveWorldText(messageID);
-		}
+		_currentTopLists.ForEach(id => Capability_SharedAPI.Get()?.RemoveWorldText(id));
 		_currentTopLists.Clear();
 		_updateTimer?.Kill();
 	}
@@ -179,12 +176,22 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 		var mapName = Server.MapName;
 		var path = Path.Combine(ModuleDirectory, $"{mapName}_toplists.json");
+
 		if (File.Exists(path))
 		{
 			var data = JsonSerializer.Deserialize<List<WorldTextData>>(File.ReadAllText(path));
 			if (data != null)
 			{
-				data.RemoveAll(x => x.Location == target.Entity.AbsOrigin.ToString() && x.Rotation == target.Entity.AbsRotation.ToString());
+				Vector entityVector = target.Entity.AbsOrigin;
+
+				data.RemoveAll(x =>
+				{
+					Vector location = ParseVector(x.Location);
+					return location.X == entityVector.X &&
+						   location.Y == entityVector.Y &&
+						   x.Rotation == target.Entity.AbsRotation.ToString();
+				});
+
 				File.WriteAllText(path, JsonSerializer.Serialize(data));
 			}
 		}
