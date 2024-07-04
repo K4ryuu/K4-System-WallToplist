@@ -1,3 +1,9 @@
+-- v1.0.3 - 2024.07.04
+
+- fix: Optimised foreach cycles to reuse API
+- fix: Mapchange breaks the auto-updater
+- fix: Unload and mapchange not clearing the cache
+
 -- v1.0.2 - 2024.07.02
 
 - fix: Issue that caused toplist not deleted from file

@@ -56,7 +56,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 {
 	public override string ModuleName => "K4-System @ Wall Toplist";
 	public override string ModuleAuthor => "K4ryuu";
-	public override string ModuleVersion => "1.0.2";
+	public override string ModuleVersion => "1.0.3";
 	public required PluginConfig Config { get; set; } = new PluginConfig();
 	public static PluginCapability<IK4WorldTextSharedAPI> Capability_SharedAPI { get; } = new("k4-worldtext:sharedapi");
 
@@ -73,7 +73,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 	public override void OnAllPluginsLoaded(bool hotReload)
 	{
-		AddTimer(3, LoadWorldTextFromFile);
+		AddTimer(3, () => LoadWorldTextFromFile());
 
 		if (Config.TimeBasedUpdate)
 		{
@@ -88,18 +88,26 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 		RegisterListener<Listeners.OnMapStart>((mapName) =>
 		{
-			AddTimer(1, LoadWorldTextFromFile);
+			Logger.LogInformation("Loading toplists for map: {0}", mapName);
+			AddTimer(1, () => LoadWorldTextFromFile(mapName));
 		});
 
 		RegisterListener<Listeners.OnMapEnd>(() =>
 		{
+			var checkAPI = Capability_SharedAPI.Get();
+			if (checkAPI != null)
+				_currentTopLists.ForEach(id => checkAPI.RemoveWorldText(id, false));
+
 			_currentTopLists.Clear();
 		});
 	}
 
 	public override void Unload(bool hotReload)
 	{
-		_currentTopLists.ForEach(id => Capability_SharedAPI.Get()?.RemoveWorldText(id));
+		var checkAPI = Capability_SharedAPI.Get();
+		if (checkAPI != null)
+			_currentTopLists.ForEach(id => checkAPI.RemoveWorldText(id, false));
+
 		_currentTopLists.Clear();
 		_updateTimer?.Kill();
 	}
@@ -171,7 +179,7 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 			return;
 		}
 
-		checkAPI.RemoveWorldText(target.Id);
+		checkAPI.RemoveWorldText(target.Id, false);
 		_currentTopLists.Remove(target.Id);
 
 		var mapName = Server.MapName;
@@ -232,9 +240,9 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 		File.WriteAllText(path, JsonSerializer.Serialize(data));
 	}
 
-	private void LoadWorldTextFromFile()
+	private void LoadWorldTextFromFile(string? passedMapName = null)
 	{
-		var mapName = Server.MapName;
+		var mapName = passedMapName ?? Server.MapName;
 		var path = Path.Combine(ModuleDirectory, $"{mapName}_toplists.json");
 
 		if (File.Exists(path))
@@ -300,17 +308,11 @@ public class PluginK4Toplist : BasePlugin, IPluginConfig<PluginConfig>
 
 			Server.NextWorldUpdate(() =>
 			{
-				AddTimer(1, () =>
+				var checkAPI = Capability_SharedAPI.Get();
+				if (checkAPI != null)
 				{
-					var checkAPI = Capability_SharedAPI.Get();
-					if (checkAPI != null)
-					{
-						foreach (int messageID in _currentTopLists)
-						{
-							checkAPI.UpdateWorldText(messageID, linesList);
-						}
-					}
-				});
+					_currentTopLists.ForEach(id => checkAPI.UpdateWorldText(id, linesList));
+				}
 			});
 		});
 	}
